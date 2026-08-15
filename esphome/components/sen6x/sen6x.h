@@ -34,7 +34,7 @@ struct TemperatureAcceleration {
   uint16_t t2;
 };
 
-class SEN6XComponent : public PollingComponent, public sensirion_common::SensirionI2CDevice {
+class SEN6XComponent final : public PollingComponent, public sensirion_common::SensirionI2CDevice {
   SUB_SENSOR(pm_1_0)
   SUB_SENSOR(pm_2_5)
   SUB_SENSOR(pm_4_0)

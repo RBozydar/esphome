@@ -11,6 +11,10 @@ namespace esphome::api {
 
 namespace enums {
 
+enum DisconnectReason : uint32_t {
+  DISCONNECT_REASON_UNSPECIFIED = 0,
+  DISCONNECT_REASON_PROVISIONING_CLOSED = 1,
+};
 enum SerialProxyPortType : uint32_t {
   SERIAL_PROXY_PORT_TYPE_TTL = 0,
   SERIAL_PROXY_PORT_TYPE_RS232 = 1,
@@ -92,6 +96,11 @@ enum SupportsResponseType : uint32_t {
   SUPPORTS_RESPONSE_STATUS = 100,
 };
 #endif
+enum TemperatureUnit : uint32_t {
+  TEMPERATURE_UNIT_CELSIUS = 0,
+  TEMPERATURE_UNIT_FAHRENHEIT = 1,
+  TEMPERATURE_UNIT_KELVIN = 2,
+};
 #ifdef USE_CLIMATE
 enum ClimateMode : uint32_t {
   CLIMATE_MODE_OFF = 0,
@@ -176,6 +185,8 @@ enum LockState : uint32_t {
   LOCK_STATE_JAMMED = 3,
   LOCK_STATE_LOCKING = 4,
   LOCK_STATE_UNLOCKING = 5,
+  LOCK_STATE_OPENING = 6,
+  LOCK_STATE_OPEN = 7,
 };
 enum LockCommand : uint32_t {
   LOCK_UNLOCK = 0,
@@ -214,7 +225,7 @@ enum MediaPlayerFormatPurpose : uint32_t {
   MEDIA_PLAYER_FORMAT_PURPOSE_ANNOUNCEMENT = 1,
 };
 #endif
-#ifdef USE_BLUETOOTH_PROXY
+#ifdef USE_BLUETOOTH_PROXY_CONNECTIONS
 enum BluetoothDeviceRequestType : uint32_t {
   BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT = 0,
   BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT = 1,
@@ -224,6 +235,8 @@ enum BluetoothDeviceRequestType : uint32_t {
   BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITHOUT_CACHE = 5,
   BLUETOOTH_DEVICE_REQUEST_TYPE_CLEAR_CACHE = 6,
 };
+#endif
+#ifdef USE_BLUETOOTH_PROXY
 enum BluetoothScannerState : uint32_t {
   BLUETOOTH_SCANNER_STATE_IDLE = 0,
   BLUETOOTH_SCANNER_STATE_STARTING = 1,
@@ -420,18 +433,22 @@ class HelloResponse final : public ProtoMessage {
 
  protected:
 };
-class DisconnectRequest final : public ProtoMessage {
+class DisconnectRequest final : public ProtoDecodableMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 5;
-  static constexpr uint8_t ESTIMATED_SIZE = 0;
+  static constexpr uint8_t ESTIMATED_SIZE = 2;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("disconnect_request"); }
 #endif
+  enums::DisconnectReason reason{};
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const char *dump_to(DumpBuffer &out) const override;
 #endif
 
  protected:
+  bool decode_varint(uint32_t field_id, proto_varint_value_t value) override;
 };
 class DisconnectResponse final : public ProtoMessage {
  public:
@@ -518,7 +535,7 @@ class SerialProxyInfo final : public ProtoMessage {
 class DeviceInfoResponse final : public ProtoMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 10;
-  static constexpr uint16_t ESTIMATED_SIZE = 309;
+  static constexpr uint16_t ESTIMATED_SIZE = 312;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("device_info_response"); }
 #endif
@@ -570,6 +587,77 @@ class DeviceInfoResponse final : public ProtoMessage {
 #endif
 #ifdef USE_ZWAVE_PROXY
   uint32_t zwave_home_id{0};
+#endif
+#ifdef USE_SERIAL_PROXY
+  std::array<SerialProxyInfo, SERIAL_PROXY_COUNT> serial_proxies{};
+#endif
+#ifdef USE_API_NOISE
+  bool api_encryption_provisionable{false};
+#endif
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const char *dump_to(DumpBuffer &out) const override;
+#endif
+
+ protected:
+};
+#ifdef USE_BLUETOOTH_PROXY
+class BluetoothProxyCapabilities final : public ProtoMessage {
+ public:
+  uint32_t feature_flags{0};
+  StringRef mac_address{};
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const char *dump_to(DumpBuffer &out) const override;
+#endif
+
+ protected:
+};
+#endif
+#ifdef USE_VOICE_ASSISTANT
+class VoiceAssistantCapabilities final : public ProtoMessage {
+ public:
+  uint32_t feature_flags{0};
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const char *dump_to(DumpBuffer &out) const override;
+#endif
+
+ protected:
+};
+#endif
+#ifdef USE_ZWAVE_PROXY
+class ZWaveProxyCapabilities final : public ProtoMessage {
+ public:
+  uint32_t feature_flags{0};
+  uint32_t home_id{0};
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const char *dump_to(DumpBuffer &out) const override;
+#endif
+
+ protected:
+};
+#endif
+class DeviceCapabilitiesResponse final : public ProtoMessage {
+ public:
+  static constexpr uint8_t MESSAGE_TYPE = 150;
+  static constexpr uint8_t ESTIMATED_SIZE = 102;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const LogString *message_name() const override { return LOG_STR("device_capabilities_response"); }
+#endif
+#ifdef USE_BLUETOOTH_PROXY
+  BluetoothProxyCapabilities bluetooth_proxy{};
+#endif
+#ifdef USE_VOICE_ASSISTANT
+  VoiceAssistantCapabilities voice_assistant{};
+#endif
+#ifdef USE_ZWAVE_PROXY
+  ZWaveProxyCapabilities zwave_proxy{};
 #endif
 #ifdef USE_SERIAL_PROXY
   std::array<SerialProxyInfo, SERIAL_PROXY_COUNT> serial_proxies{};
@@ -1372,7 +1460,7 @@ class CameraImageRequest final : public ProtoDecodableMessage {
 class ListEntitiesClimateResponse final : public InfoResponseProtoMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 46;
-  static constexpr uint8_t ESTIMATED_SIZE = 150;
+  static constexpr uint8_t ESTIMATED_SIZE = 153;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("list_entities_climate_response"); }
 #endif
@@ -1394,6 +1482,7 @@ class ListEntitiesClimateResponse final : public InfoResponseProtoMessage {
   float visual_min_humidity{0.0f};
   float visual_max_humidity{0.0f};
   uint32_t feature_flags{0};
+  enums::TemperatureUnit temperature_unit{};
   uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
   uint32_t calculate_size() const;
 #ifdef HAS_PROTO_MESSAGE_DUMP
@@ -1471,7 +1560,7 @@ class ClimateCommandRequest final : public CommandProtoMessage {
 class ListEntitiesWaterHeaterResponse final : public InfoResponseProtoMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 132;
-  static constexpr uint8_t ESTIMATED_SIZE = 63;
+  static constexpr uint8_t ESTIMATED_SIZE = 65;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("list_entities_water_heater_response"); }
 #endif
@@ -1480,6 +1569,7 @@ class ListEntitiesWaterHeaterResponse final : public InfoResponseProtoMessage {
   float target_temperature_step{0.0f};
   const water_heater::WaterHeaterModeMask *supported_modes{};
   uint32_t supported_features{0};
+  enums::TemperatureUnit temperature_unit{};
   uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
   uint32_t calculate_size() const;
 #ifdef HAS_PROTO_MESSAGE_DUMP
@@ -1911,6 +2001,8 @@ class BluetoothLERawAdvertisementsResponse final : public ProtoMessage {
 
  protected:
 };
+#endif
+#ifdef USE_BLUETOOTH_PROXY_CONNECTIONS
 class BluetoothDeviceRequest final : public ProtoDecodableMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 68;
@@ -2296,6 +2388,8 @@ class BluetoothDeviceClearCacheResponse final : public ProtoMessage {
 
  protected:
 };
+#endif
+#ifdef USE_BLUETOOTH_PROXY
 class BluetoothScannerStateResponse final : public ProtoMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 126;
@@ -2427,13 +2521,15 @@ class VoiceAssistantEventResponse final : public ProtoDecodableMessage {
 class VoiceAssistantAudio final : public ProtoDecodableMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 106;
-  static constexpr uint8_t ESTIMATED_SIZE = 21;
+  static constexpr uint8_t ESTIMATED_SIZE = 40;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("voice_assistant_audio"); }
 #endif
   const uint8_t *data{nullptr};
   uint16_t data_len{0};
   bool end{false};
+  const uint8_t *data2{nullptr};
+  uint16_t data2_len{0};
   uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
   uint32_t calculate_size() const;
 #ifdef HAS_PROTO_MESSAGE_DUMP
@@ -3054,11 +3150,11 @@ class ListEntitiesInfraredResponse final : public InfoResponseProtoMessage {
  protected:
 };
 #endif
-#ifdef USE_IR_RF
+#if defined(USE_IR_RF) || defined(USE_RADIO_FREQUENCY)
 class InfraredRFTransmitRawTimingsRequest final : public ProtoDecodableMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 136;
-  static constexpr uint8_t ESTIMATED_SIZE = 220;
+  static constexpr uint8_t ESTIMATED_SIZE = 224;
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const LogString *message_name() const override { return LOG_STR("infrared_rf_transmit_raw_timings_request"); }
 #endif
@@ -3071,6 +3167,7 @@ class InfraredRFTransmitRawTimingsRequest final : public ProtoDecodableMessage {
   const uint8_t *timings_data_{nullptr};
   uint16_t timings_length_{0};
   uint16_t timings_count_{0};
+  uint32_t modulation{0};
 #ifdef HAS_PROTO_MESSAGE_DUMP
   const char *dump_to(DumpBuffer &out) const override;
 #endif
@@ -3092,6 +3189,27 @@ class InfraredRFReceiveEvent final : public ProtoMessage {
 #endif
   uint32_t key{0};
   const std::vector<int32_t> *timings{};
+  uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
+  uint32_t calculate_size() const;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const char *dump_to(DumpBuffer &out) const override;
+#endif
+
+ protected:
+};
+#endif
+#ifdef USE_RADIO_FREQUENCY
+class ListEntitiesRadioFrequencyResponse final : public InfoResponseProtoMessage {
+ public:
+  static constexpr uint8_t MESSAGE_TYPE = 148;
+  static constexpr uint8_t ESTIMATED_SIZE = 56;
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  const LogString *message_name() const override { return LOG_STR("list_entities_radio_frequency_response"); }
+#endif
+  uint32_t capabilities{0};
+  uint32_t frequency_min{0};
+  uint32_t frequency_max{0};
+  uint32_t supported_modulations{0};
   uint8_t *encode(ProtoWriteBuffer &buffer PROTO_ENCODE_DEBUG_PARAM) const;
   uint32_t calculate_size() const;
 #ifdef HAS_PROTO_MESSAGE_DUMP
@@ -3246,7 +3364,7 @@ class SerialProxyRequestResponse final : public ProtoMessage {
  protected:
 };
 #endif
-#ifdef USE_BLUETOOTH_PROXY
+#ifdef USE_BLUETOOTH_PROXY_CONNECTIONS
 class BluetoothSetConnectionParamsRequest final : public ProtoDecodableMessage {
  public:
   static constexpr uint8_t MESSAGE_TYPE = 145;

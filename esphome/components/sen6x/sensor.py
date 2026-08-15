@@ -1,5 +1,6 @@
 import esphome.codegen as cg
 from esphome.components import i2c, sensirion_common, sensor
+from esphome.components.const import CONF_NOX_INDEX, CONF_VOC_INDEX
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ALGORITHM_TUNING,
@@ -30,7 +31,6 @@ from esphome.const import (
     CONF_TIME_CONSTANT,
     CONF_TYPE,
     CONF_VOC,
-    DEVICE_CLASS_AQI,
     DEVICE_CLASS_CARBON_DIOXIDE,
     DEVICE_CLASS_HUMIDITY,
     DEVICE_CLASS_PM1,
@@ -49,7 +49,7 @@ from esphome.const import (
     UNIT_PERCENT,
 )
 
-CODEOWNERS = ["@martgras", "@mebner86", "@mikelawrence", "@tuct"]
+CODEOWNERS = ["@martgras", "@mebner86", "@tuct"]
 DEPENDENCIES = ["i2c"]
 AUTO_LOAD = ["sensirion_common"]
 
@@ -101,12 +101,13 @@ def _gas_sensor(
     return sensor.sensor_schema(
         icon=ICON_RADIATOR,
         accuracy_decimals=0,
-        device_class=DEVICE_CLASS_AQI,
         state_class=STATE_CLASS_MEASUREMENT,
     ).extend({cv.Optional(CONF_ALGORITHM_TUNING): cv.Schema(tuning_schema)})
 
 
-CONFIG_SCHEMA = (
+CONFIG_SCHEMA = cv.All(
+    cv.rename_key(CONF_VOC, CONF_VOC_INDEX, removed_in="2027.2.0", component="sen6x"),
+    cv.rename_key(CONF_NOX, CONF_NOX_INDEX, removed_in="2027.2.0", component="sen6x"),
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SEN6XComponent),
@@ -154,7 +155,7 @@ CONFIG_SCHEMA = (
                 device_class=DEVICE_CLASS_HUMIDITY,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
-            cv.Optional(CONF_VOC): _gas_sensor(
+            cv.Optional(CONF_VOC_INDEX): _gas_sensor(
                 index_offset=100,
                 learning_time_offset=12,
                 learning_time_gain=12,
@@ -162,7 +163,7 @@ CONFIG_SCHEMA = (
                 std_initial=50,
                 gain_factor=230,
             ),
-            cv.Optional(CONF_NOX): _gas_sensor(
+            cv.Optional(CONF_NOX_INDEX): _gas_sensor(
                 index_offset=1,
                 learning_time_offset=12,
                 learning_time_gain=12,
@@ -221,7 +222,7 @@ CONFIG_SCHEMA = (
         }
     )
     .extend(cv.polling_component_schema("60s"))
-    .extend(i2c.i2c_device_schema(0x6B))
+    .extend(i2c.i2c_device_schema(0x6B)),
 )
 
 SENSOR_MAP = {
@@ -231,8 +232,8 @@ SENSOR_MAP = {
     CONF_PM_10_0: "set_pm_10_0_sensor",
     CONF_TEMPERATURE: "set_temperature_sensor",
     CONF_HUMIDITY: "set_humidity_sensor",
-    CONF_VOC: "set_voc_sensor",
-    CONF_NOX: "set_nox_sensor",
+    CONF_VOC_INDEX: "set_voc_sensor",
+    CONF_NOX_INDEX: "set_nox_sensor",
     CONF_CO2: "set_co2_sensor",
     CONF_FORMALDEHYDE: "set_hcho_sensor",
 }
@@ -254,7 +255,7 @@ async def to_code(config):
             sens = await sensor.new_sensor(cfg)
             cg.add(getattr(var, func_name)(sens))
 
-    if cfg := config.get(CONF_VOC, {}).get(CONF_ALGORITHM_TUNING):
+    if cfg := config.get(CONF_VOC_INDEX, {}).get(CONF_ALGORITHM_TUNING):
         cg.add(
             var.set_voc_algorithm_tuning(
                 cfg[CONF_INDEX_OFFSET],
@@ -265,7 +266,7 @@ async def to_code(config):
                 cfg[CONF_GAIN_FACTOR],
             )
         )
-    if cfg := config.get(CONF_NOX, {}).get(CONF_ALGORITHM_TUNING):
+    if cfg := config.get(CONF_NOX_INDEX, {}).get(CONF_ALGORITHM_TUNING):
         cg.add(
             var.set_nox_algorithm_tuning(
                 cfg[CONF_INDEX_OFFSET],
