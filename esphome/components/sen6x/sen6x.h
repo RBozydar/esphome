@@ -111,6 +111,8 @@ class SEN6XComponent : public PollingComponent, public sensirion_common::Sensiri
   bool write_tuning_parameters_(uint16_t i2c_command, const GasTuning &tuning);
   bool write_temperature_compensation_(const TemperatureCompensation &compensation);
   bool write_temperature_acceleration_(const TemperatureAcceleration &acceleration);
+  void prepare_startup_();
+  void identify_device_();
   Sen6xType infer_type_from_product_name_(const std::string &product_name);
   void schedule_post_setup_commands_();
   void run_next_setup_step_();

@@ -11,6 +11,9 @@ static const char *const TAG = "sen6x";
 static constexpr uint8_t POLL_RETRIES = 24;     // 24 attempts
 static constexpr uint32_t I2C_READ_DELAY = 20;  // 20 ms to wait for I2C read to complete
 static constexpr uint32_t POLL_INTERVAL = 50;   // 50 ms between poll attempts
+static constexpr uint32_t SETUP_INITIAL_DELAY = 500;
+static constexpr uint32_t STOP_MEASUREMENTS_DELAY = 1400;
+static constexpr uint32_t START_MEASUREMENTS_DELAY = 50;
 // Single numeric timeout ID — the chain is sequential so only one is active at a time.
 static constexpr uint32_t TIMEOUT_POLL = 1;
 static constexpr uint32_t TIMEOUT_SETUP_STEP = 2;
@@ -35,7 +38,7 @@ static constexpr uint16_t SEN6X_CMD_VOC_ALGORITHM_TUNING = 0x60D0;
 static constexpr uint16_t SEN6X_CMD_CO2_SENSOR_AUTOMATIC_SELF_CAL = 0x6711;
 static constexpr uint16_t SEN6X_CMD_AMBIENT_PRESSURE = 0x6720;
 static constexpr uint16_t SEN6X_CMD_SENSOR_ALTITUDE = 0x6736;
-static constexpr uint16_t SEN6X_CMD_RESET = 0xD304;
+static constexpr uint16_t SEN6X_CMD_STOP_MEASUREMENTS = 0x0104;
 
 static inline void set_read_command_and_words(SEN6XComponent::Sen6xType type, uint16_t &read_cmd, uint8_t &read_words) {
   read_cmd = SEN6X_CMD_READ_MEASUREMENT;
@@ -73,89 +76,98 @@ static inline void set_read_command_and_words(SEN6XComponent::Sen6xType type, ui
 void SEN6XComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up sen6x...");
 
-  // the sensor needs 100 ms to enter the idle state
-  this->set_timeout(100, [this]() {
-    // Reset the sensor to ensure a clean state regardless of prior commands or power issues
-    if (!this->write_command(SEN6X_CMD_RESET)) {
+  // Allow the sensor to reach idle after power-up before probing its current mode.
+  this->set_timeout(SETUP_INITIAL_DELAY, [this]() { this->prepare_startup_(); });
+}
+
+void SEN6XComponent::prepare_startup_() {
+  // Stop Measurement is available only in measurement mode. A successful write
+  // therefore means that the sensor was running and must be allowed to finish
+  // stopping before idle-only setup commands are sent. A failed write is expected
+  // when the sensor is already idle; identification below provides the actual
+  // communication check. Do not use Get Data Ready here: a false result is also
+  // returned while a measurement is running but no new sample is ready.
+  if (this->write_command(SEN6X_CMD_STOP_MEASUREMENTS)) {
+    ESP_LOGD(TAG, "Existing measurement detected, stopping measurement");
+    // Sensirion requires at least 1400 ms after stop before starting a new measurement.
+    this->set_timeout(TIMEOUT_SETUP_STEP, STOP_MEASUREMENTS_DELAY,
+                      [this]() { this->identify_device_(); });
+    return;
+  }
+
+  ESP_LOGD(TAG, "Sensor is idle, continuing startup");
+  this->identify_device_();
+}
+
+void SEN6XComponent::identify_device_() {
+  uint16_t raw_serial_number[16];
+  if (!this->get_register(SEN6X_CMD_GET_SERIAL_NUMBER, raw_serial_number, 16, I2C_READ_DELAY)) {
+    ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
+    this->mark_failed(LOG_STR(ESP_LOG_MSG_COMM_FAIL));
+    return;
+  }
+  this->serial_number_ = SEN6XComponent::sensirion_convert_to_string_in_place(raw_serial_number, 16);
+  ESP_LOGI(TAG, "Serial number: %s", this->serial_number_.c_str());
+
+  // Keep each blocking I2C command in its own loop callback.
+  this->set_timeout(TIMEOUT_SETUP_STEP, I2C_READ_DELAY, [this]() {
+    uint16_t raw_product_name[16];
+    if (!this->get_register(SEN6X_CMD_GET_PRODUCT_NAME, raw_product_name, 16, I2C_READ_DELAY)) {
       ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
       this->mark_failed(LOG_STR(ESP_LOG_MSG_COMM_FAIL));
       return;
     }
 
-    // After reset the sensor needs 100 ms to become ready
-    this->set_timeout(100, [this]() {
-      // Step 1: Read serial number (~25ms with I2C delay)
-      uint16_t raw_serial_number[16];
-      if (!this->get_register(SEN6X_CMD_GET_SERIAL_NUMBER, raw_serial_number, 16, 20)) {
+    this->product_name_ = SEN6XComponent::sensirion_convert_to_string_in_place(raw_product_name, 16);
+
+    Sen6xType inferred_type = this->infer_type_from_product_name_(this->product_name_);
+    if (this->sen6x_type_ == UNKNOWN) {
+      this->sen6x_type_ = inferred_type;
+      if (inferred_type == UNKNOWN) {
+        ESP_LOGE(TAG, "Unknown product '%s'", this->product_name_.c_str());
+        this->mark_failed();
+        return;
+      }
+      ESP_LOGD(TAG, "Type inferred from product: %s", this->product_name_.c_str());
+    } else if (this->sen6x_type_ != inferred_type && inferred_type != UNKNOWN) {
+      ESP_LOGW(TAG, "Configured type (used) mismatches product '%s'", this->product_name_.c_str());
+    }
+    ESP_LOGI(TAG, "Product: %s", this->product_name_.c_str());
+
+    // Validate configured sensors against detected type and disable unsupported ones
+    const bool has_voc_nox = (this->sen6x_type_ == SEN65 || this->sen6x_type_ == SEN66 ||
+                              this->sen6x_type_ == SEN68 || this->sen6x_type_ == SEN69C);
+    const bool has_co2 = (this->sen6x_type_ == SEN63C || this->sen6x_type_ == SEN66 || this->sen6x_type_ == SEN69C);
+    const bool has_hcho = (this->sen6x_type_ == SEN68 || this->sen6x_type_ == SEN69C);
+    if (this->voc_sensor_ && !has_voc_nox) {
+      ESP_LOGE(TAG, "VOC requires SEN65, SEN66, SEN68, or SEN69C");
+      this->voc_sensor_ = nullptr;
+    }
+    if (this->nox_sensor_ && !has_voc_nox) {
+      ESP_LOGE(TAG, "NOx requires SEN65, SEN66, SEN68, or SEN69C");
+      this->nox_sensor_ = nullptr;
+    }
+    if (this->co2_sensor_ && !has_co2) {
+      ESP_LOGE(TAG, "CO2 requires SEN63C, SEN66, or SEN69C");
+      this->co2_sensor_ = nullptr;
+    }
+    if (this->hcho_sensor_ && !has_hcho) {
+      ESP_LOGE(TAG, "Formaldehyde requires SEN68 or SEN69C");
+      this->hcho_sensor_ = nullptr;
+    }
+
+    this->set_timeout(TIMEOUT_SETUP_STEP, I2C_READ_DELAY, [this]() {
+      uint16_t raw_firmware_version = 0;
+      if (!this->get_register(SEN6X_CMD_GET_FIRMWARE_VERSION, raw_firmware_version, I2C_READ_DELAY)) {
         ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
         this->mark_failed(LOG_STR(ESP_LOG_MSG_COMM_FAIL));
         return;
       }
-      this->serial_number_ = SEN6XComponent::sensirion_convert_to_string_in_place(raw_serial_number, 16);
-      ESP_LOGI(TAG, "Serial number: %s", this->serial_number_.c_str());
+      this->firmware_version_major_ = (raw_firmware_version >> 8) & 0xFF;
+      this->firmware_version_minor_ = raw_firmware_version & 0xFF;
+      ESP_LOGI(TAG, "Firmware: %u.%u", this->firmware_version_major_, this->firmware_version_minor_);
 
-      // Step 2: Read product name - use non-zero delay to avoid chaining blocking I2C reads in one loop tick
-      this->set_timeout(20, [this]() {
-        uint16_t raw_product_name[16];
-        if (!this->get_register(SEN6X_CMD_GET_PRODUCT_NAME, raw_product_name, 16, 20)) {
-          ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
-          this->mark_failed(LOG_STR(ESP_LOG_MSG_COMM_FAIL));
-          return;
-        }
-
-        this->product_name_ = SEN6XComponent::sensirion_convert_to_string_in_place(raw_product_name, 16);
-
-        Sen6xType inferred_type = this->infer_type_from_product_name_(this->product_name_);
-        if (this->sen6x_type_ == UNKNOWN) {
-          this->sen6x_type_ = inferred_type;
-          if (inferred_type == UNKNOWN) {
-            ESP_LOGE(TAG, "Unknown product '%s'", this->product_name_.c_str());
-            this->mark_failed();
-            return;
-          }
-          ESP_LOGD(TAG, "Type inferred from product: %s", this->product_name_.c_str());
-        } else if (this->sen6x_type_ != inferred_type && inferred_type != UNKNOWN) {
-          ESP_LOGW(TAG, "Configured type (used) mismatches product '%s'", this->product_name_.c_str());
-        }
-        ESP_LOGI(TAG, "Product: %s", this->product_name_.c_str());
-
-        // Validate configured sensors against detected type and disable unsupported ones
-        const bool has_voc_nox = (this->sen6x_type_ == SEN65 || this->sen6x_type_ == SEN66 ||
-                                  this->sen6x_type_ == SEN68 || this->sen6x_type_ == SEN69C);
-        const bool has_co2 = (this->sen6x_type_ == SEN63C || this->sen6x_type_ == SEN66 || this->sen6x_type_ == SEN69C);
-        const bool has_hcho = (this->sen6x_type_ == SEN68 || this->sen6x_type_ == SEN69C);
-        if (this->voc_sensor_ && !has_voc_nox) {
-          ESP_LOGE(TAG, "VOC requires SEN65, SEN66, SEN68, or SEN69C");
-          this->voc_sensor_ = nullptr;
-        }
-        if (this->nox_sensor_ && !has_voc_nox) {
-          ESP_LOGE(TAG, "NOx requires SEN65, SEN66, SEN68, or SEN69C");
-          this->nox_sensor_ = nullptr;
-        }
-        if (this->co2_sensor_ && !has_co2) {
-          ESP_LOGE(TAG, "CO2 requires SEN63C, SEN66, or SEN69C");
-          this->co2_sensor_ = nullptr;
-        }
-        if (this->hcho_sensor_ && !has_hcho) {
-          ESP_LOGE(TAG, "Formaldehyde requires SEN68 or SEN69C");
-          this->hcho_sensor_ = nullptr;
-        }
-
-        // Step 3: Read firmware version - use non-zero delay to avoid chaining blocking I2C reads in one loop tick
-        this->set_timeout(20, [this]() {
-          uint16_t raw_firmware_version = 0;
-          if (!this->get_register(SEN6X_CMD_GET_FIRMWARE_VERSION, raw_firmware_version, 20)) {
-            ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
-            this->mark_failed(LOG_STR(ESP_LOG_MSG_COMM_FAIL));
-            return;
-          }
-          this->firmware_version_major_ = (raw_firmware_version >> 8) & 0xFF;
-          this->firmware_version_minor_ = raw_firmware_version & 0xFF;
-          ESP_LOGI(TAG, "Firmware: %u.%u", this->firmware_version_major_, this->firmware_version_minor_);
-
-          this->schedule_post_setup_commands_();
-        });
-      });
+      this->schedule_post_setup_commands_();
     });
   });
 }
@@ -275,9 +287,12 @@ void SEN6XComponent::finish_setup_() {
     return;
   }
 
-  this->set_timeout(this->startup_delay_ms_, [this]() { this->startup_complete_ = true; });
-  this->initialized_ = true;
-  ESP_LOGD(TAG, "Initialized");
+  // Wait for the start command to complete before allowing the poller to run.
+  this->set_timeout(TIMEOUT_SETUP_STEP, START_MEASUREMENTS_DELAY, [this]() {
+    this->set_timeout(this->startup_delay_ms_, [this]() { this->startup_complete_ = true; });
+    this->initialized_ = true;
+    ESP_LOGD(TAG, "Initialized");
+  });
 }
 
 void SEN6XComponent::dump_config() {
